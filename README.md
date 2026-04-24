@@ -3,13 +3,6 @@
 
 gpr max
 
-
-## References
-
-MCG GPR dataset: https://zenodo.org/records/14270869
-Mamba-Net: https://arxiv.org/pdf/2601.17108
-
-
 ## data set
 扫描结果非常清晰！作为一个 CV 专家，你一眼就能看出这个数据集的结构其实非常有诚意，它不仅仅给了你用来刷榜的“考卷”，还给了你大量的“课外读物”。
 
@@ -51,81 +44,173 @@ GPR_Standard/
     └── masks/   <-- 对应 DOWNSTREAM/D_TEST/
 ```
 
-### 3. 一个致命细节提醒
+## 配环境步骤
 
-请务必检查一下：**`annotations` 下的文件名是否与 `images` 下的文件名完全一致？**
-从你的扫描看：
-* `images/D_TRAIN` 有 `AA1.png`
-* `annotations/D_TRAIN` 也有 `AA1.png`
-这非常好！这意味着它们是 **Pixel-level Mask**。
-
-**但是！** 检查一下 `AA1.png` 在 `annotations` 里的像素值。
-* 如果是 **0 和 255**（黑白图），你需要显式地在 DataLoader 里把它们除以 255 变成 **0 和 1**。
-* 如果是 **0 和 1**，肉眼看过去是全黑的，别以为文件坏了，那是正常的分类标签。
-
-
-## 训练配置建议
-```yaml
-compute_environment: LOCAL_MACHINE
-debug: false
-distributed_type: 'NO'
-downcast_bf16: 'no'
-enable_cpu_affinity: true
-gpu_ids: all
-machine_rank: 0
-main_training_function: main
-mixed_precision: bf16
-num_machines: 1
-num_processes: 1
-rdzv_backend: static
-same_network: true
-tpu_env: []
-tpu_use_cluster: false
-tpu_use_sudo: false
-use_cpu: false
+激活 uv 环境
+```bash
+source .venv/bin/activate
 ```
 
-这绝对是**目前最明智的决定**。
+### 1. 首先在 宿主机 上 安装 cuda 13 驱动（最新的）然后进入 wsl 中确定可以通过 `nvidia-smi` 看到你的显卡和驱动版本
 
-你刚才看到的 `12.00 GiB` 内存请求，很大程度上是因为 `transformers` 的 **Naive 实现**（纯 PyTorch 循环和矩阵广播）极其低效。而在 Linux Docker 容器中，你可以安装 Mamba 的**官方 CUDA 算子**，性能会有质的飞跃。
+### 2. 在 wsl 中安装 cuda 12.8 的 toolkit（不安装驱动）
 
-### 为什么 Docker 容器能解决你的问题？
+```bash
+## 安装 CUDA 12.8 驱动
+wget https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda_12.8.0_570.86.10_linux.run
+sudo sh cuda_12.8.0_570.86.10_linux.run
+```
 
-1.  **Selective Scan 内核加速**：官方的 `mamba-ssm` 和 `causal-conv1d` 算子使用了 **Fused CUDA Kernel**。
-    * **Naive 实现（你现在的路径）**：会将所有中间状态 $SBMD$ 全部展开存储在显存里，导致内存需求随序列长度爆炸。
-    * **CUDA 算子（Docker 路径）**：在 GPU 寄存器里完成计算，**不存储中间的大型张量**。显存占用能降低 **5~10 倍**。
-2.  **避免 Windows 编译地狱**：Mamba 的 C++/CUDA 扩展在 Windows 下编译非常困难（需要特定的 VS Build Tools 和环境变量）。在 Docker (Ubuntu) 环境下，一个 `pip install` 就能搞定。
+```bash
+# 强制将 12.8 放在 PATH 的最前面
+export PATH=/usr/local/cuda-12.8/bin:$PATH
+export CUDA_HOME=/usr/local/cuda-12.8
+export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
+
+# 再次验证，必须看到 12.8
+nvcc -V
+```
+
+### 4. 开始安装
+这一步需要指定 gcc-12 的路径。
+
+```bash
+CC=gcc-12 CXX=g++-12 \
+TORCH_CUDA_ARCH_LIST="10.0" \
+MAMBA_FORCE_BUILD=TRUE \
+uv pip install \
+    --no-binary causal-conv1d \
+    --no-binary mamba-ssm \
+    --no-cache \
+    causal-conv1d mamba-ssm
+```
+
+```bash
+# 设置环境变量指向 GCC 12，然后开始安装
+CC=gcc-12 CXX=g++-12 uv pip install causal-conv1d --no-cache
+CC=gcc-12 CXX=g++-12 uv pip install mamba-ssm --no-cache
+
+# 记得带上 GCC 12 的环境变量，除非你确认 12.8 已经原生支持了你的默认 GCC
+CC=gcc-12 CXX=g++-12 uv pip install causal-conv1d mamba-ssm --no-cache
+```
+
+验证代码：
+```bash
+uv run accelerate launch -m src.train
+```
+
+
+
+## 训练流程：
+非常赞同你的工程直觉。既然你决定在 `Accelerate` 的基础上构建，这套 **"Accelerate + TorchMetrics + WandB"** 的组合确实是目前兼顾“控制力”与“省心”的最优解。
+
+为了让你更清晰地理解这三者是如何协同工作的，我把整个训练流程拆解为**初始化、训练循环、指标监控、检查点管理**四个维度：
+
+### 1. 整体架构分工
+* **Accelerate:** 负责“脏活累活”。它接管设备绑定（GPU/CPU）、混合精度（BF16）、数据分发和梯度反传。
+* **TorchMetrics:** 负责“尺子”。它在每个 Step 收集 `preds` 和 `targets`，在验证结束时算出符合论文标准的指标。
+* **WandB:** 负责“仪表盘”。它把 Loss 和 Metrics 实时绘图，并把每一轮生成的雷达掩膜（Mask）存成图片供你对比。
 
 ---
 
-### 推荐的 Docker 开发配置
+### 2. 训练全流程详细拆解
 
-不要去折腾最基础的 `nvidia/cuda` 镜像。建议使用 **NVIDIA 官方 PyTorch 镜像**，它已经配置好了所有的路径和驱动映射。
+#### 第一步：环境与监控初始化
+在脚本开头，你需要配置 `Accelerator` 和 `WandB`。
+```python
+from accelerate import Accelerator
+from torchmetrics.classification import MulticlassJaccardIndex, MulticlassDice
+import wandb
 
-#### 1. 拉取镜像
-```bash
-docker pull nvcr.io/nvidia/pytorch:24.01-py3
+# 1. 初始化加速器
+accelerator = Accelerator(mixed_precision="bf16", log_with="wandb")
+
+# 2. 只有在主进程初始化 WandB (配置实验名称、超参数)
+if accelerator.is_main_process:
+    accelerator.init_trackers(
+        project_name="MambaGPR_MCG",
+        config={
+            "learning_rate": 1e-4,
+            "hidden_size": 128,
+            "patch_size": (20, 8),
+            "batch_size": 16
+        }
+    )
+
+# 3. 初始化指标 (放在设备上)
+miou_fn = MulticlassJaccardIndex(num_classes=2, average='macro').to(accelerator.device)
 ```
 
-#### 2. 启动容器 (VS Code 远程开发推荐)
-如果你用 VS Code，可以使用 "Dev Containers" 插件直接进入：
-```bash
-docker run --gpus all -it --rm -v C:\Users\admin\Desktop\personal\mambaGPR:/workspace nvcr.io/nvidia/pytorch:24.01-py3 /bin/bash
+#### 第二步：训练循环 (The Loop)
+相比原生 PyTorch，你只需把模型和数据传给 `accelerator.prepare`，它会自动处理剩下的事。
+```python
+model, optimizer, train_loader, val_loader = accelerator.prepare(
+    model, optimizer, train_loader, val_loader
+)
+
+for epoch in range(100):
+    model.train()
+    for batch in train_loader:
+        inputs, targets = batch
+        outputs = model(inputs, mode="downstream")
+        loss = criterion(outputs, targets)
+        
+        # 使用加速器进行反向传播
+        accelerator.backward(loss)
+        optimizer.step()
+        optimizer.zero_grad()
+        
+        # 记录 Loss 到 WandB
+        accelerator.log({"train_loss": loss.item()}, step=global_step)
 ```
 
-#### 3. 进入容器后安装高性能算子
-在容器的终端里运行：
-```bash
-pip install causal-conv1d>=1.4.0
-pip install mamba-ssm
+#### 第三步：验证与指标对齐 (Evaluation)
+每轮训练结束后，进行定量评估。这时 `TorchMetrics` 登场：
+```python
+    model.eval()
+    miou_fn.reset() # 每一轮开始前重置
+    
+    with torch.no_grad():
+        for inputs, targets in val_loader:
+            outputs = model(inputs, mode="downstream")
+            preds = torch.argmax(outputs, dim=1)
+            
+            # 把数据喂给指标函数 (跨显卡自动同步)
+            miou_fn.update(preds, targets)
+            
+        # 计算整轮的最终指标
+        final_miou = miou_fn.compute()
+        
+        # 记录到 WandB
+        accelerator.log({"val_miou": final_miou}, step=epoch)
 ```
-安装完成后，你再运行脚本，那行 `[transformers] The fast path is not available...` 的警告会消失，取而代之的是**极快的运行速度**和**极低的显存占用**。
+
+#### 第四步：检查点与参数管理 (Checkpointing)
+关于**模型参数管理**，`Accelerate` 提供了一个非常稳健的方案：
+
+1.  **保存：** 你不需要手动提取 `state_dict`。使用 `accelerator.save_state("path/to/checkpoint")`。它会保存模型权重、优化器状态、甚至当前的随机数种子。
+2.  **加载：** 如果训练中断，使用 `accelerator.load_state("path/to/checkpoint")` 即可无缝恢复。
+3.  **最优模型筛选：** 你可以设置一个逻辑，如果当前 `final_miou` 超过了之前的最高分，就调用一次 `accelerator.save_model(model, "best_model_dir")`。
 
 ---
 
-### 现在的行动建议
+### 3. 你最关心的：模型参数是如何管理的？
 
-1.  **如果你想立刻验证模型逻辑**：按照我上一条回复，把 `batch_size` 设为 1，`hidden_size` 降到 64，看能不能勉强跑通。
-2.  **如果你想正式开始科研/训练**：**立即转战 Docker**。在 8GB 显存这种受限环境下，高性能 CUDA 算子不是“选修课”，而是“必修课”。
+在 `Accelerate` 模式下，参数管理有以下几个特点：
 
-**总结**：Docker 提供的 Linux 环境能让你用上 Mamba 的“真身”（Triton/CUDA Kernels），而你现在在 Windows 上跑的是它的“幻影”（Naive Python 重写）。**换环境吧，这会节省你后续几周的调试时间。**
+* **集中化：** 你所有的模型超参数（hidden_size, layers 等）都作为 `dict` 传给 `wandb`。这意味着你以后在 WandB 的网页上可以一眼看到：**“那个 mIoU=0.62 的实验，到底是用 (20, 8) 还是 (8, 8) 的 Patch 跑出来的？”** 这样就避免了用文件名记参数的混乱。
+* **分布式安全：** `Accelerate` 确保只有主进程（Main Process）在写硬盘，避免了多卡同时写入导致的权重损坏。
+* **动态监控：** 你甚至可以配置 `wandb.watch(model)`，它会每隔一段时间帮你记录模型各层梯度的直方图。如果梯度消失（GPR 深层信号学不到），你可以通过可视化第一时间发现。
+
+### 总结
+这套流程的**核心优势**在于：
+1.  **极简：** 你的核心训练代码改动不超过 10 行。
+2.  **严谨：** `TorchMetrics` 帮你搞定那四个论文指标，不用担心自己写的公式有 Bug。
+3.  **可溯源：** `WandB` 帮你记住了每一次尝试。
+
+**建议下一步：** 你可以先安装这几个库，尝试在你的 `run_verify_train` 脚本里加入 `accelerator.log`。一旦能从网页上看到那条 Loss 曲线动起来，你的“科研成就感”会瞬间爆棚！
+
+## References
+
+MCG GPR dataset: https://zenodo.org/records/14270869
+Mamba-Net: https://arxiv.org/pdf/2601.17108
