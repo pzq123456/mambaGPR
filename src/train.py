@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from pathlib import Path
 
-# 确保导入你现有的类
+# 确保导入你重构后的类
 from src.dataset import GPRDataset
 from src.model import GPRMamba2
 
@@ -16,26 +16,27 @@ def run_verify_train(mode="pretext"):
     """
     accelerator = Accelerator(mixed_precision="fp16")
     
-    # --- 核心路径配置 (基于你测试成功的路径) ---
+    # --- 核心路径配置 ---
     base_path = Path(r"C:\Users\admin\Desktop\personal\mambaGPR\data")
     
-    # --- 动态配置 ---
-    # 根据你的测试日志，图像尺寸为 (340, 720)
-    img_size = (340, 720) 
-    batch_size = 4 
+    # --- 动态配置：非对称 Patch 设计 ---
+    patch_h, patch_w = 20, 4  # 与模型中定义的 patch_size 保持一致
+    # 原始 340 / 20 = 17, 原始 720 / 4 = 180
+    model_grid = (17, 180) 
+    batch_size = 2
 
     if mode == "pretext":
         img_dir = base_path / "images" / "PRETEXT" / "P_TRAIN"
         ann_dir = None
         is_pretext = True
         criterion = nn.MSELoss()
-        print(f"🛠️ 正在验证 [Pretext]: 路径 {img_dir}")
+        print(f"🛠️ 正在验证 [Pretext] (非对称Patch): 路径 {img_dir}")
     else:
         img_dir = base_path / "images" / "DOWNSTREAM" / "D_TRAIN"
         ann_dir = base_path / "annotations" / "DOWNSTREAM" / "D_TRAIN"
         is_pretext = False
         criterion = nn.CrossEntropyLoss()
-        print(f"🎯 正在验证 [Downstream]: 路径 {img_dir}")
+        print(f"🎯 正在验证 [Downstream] (非对称Patch): 路径 {img_dir}")
 
     # 1. 实例化 Dataset
     dataset = GPRDataset(
@@ -46,9 +47,10 @@ def run_verify_train(mode="pretext"):
     
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # 2. 初始化模型 (grid_size 必须匹配 340x720)
+    # 2. 初始化模型 (关键：传入计算好的 model_grid)
     model = GPRMamba2(
-        grid_size=img_size, 
+        grid_size=model_grid, 
+        patch_size=(patch_h, patch_w),
         hidden_size=128, 
         num_layers=2,
         num_classes=2
@@ -63,17 +65,15 @@ def run_verify_train(mode="pretext"):
     model.train()
     total_loss = 0
     
-    # 模拟 1 个 epoch 中的前几个 step
     for i, batch in enumerate(loader):
         optimizer.zero_grad()
         
         if mode == "pretext":
-            # batch 是 tensor: (B, 3, H, W)
             inputs = batch
+            # 现在的 model(mode="pretext") 内部已经处理好了从 (B, L, C) 到 (B, 3, 340, 720) 的重构
             outputs = model(inputs, mode="pretext")
-            loss = criterion(outputs, inputs) # 重构原图
+            loss = criterion(outputs, inputs) 
         else:
-            # batch 是 (img_tensor, mask_tensor)
             inputs, targets = batch
             outputs = model(inputs, mode="downstream")
             loss = criterion(outputs, targets)
@@ -83,22 +83,24 @@ def run_verify_train(mode="pretext"):
         
         total_loss += loss.item()
         
-        if i >= 1: # 跑 2 个 batch 足够证明流程无误
+        if i >= 1: # 跑 2 个 batch 验证
             break
 
-    print(f"✅ {mode} 验证成功! 最终 Step Loss: {loss.item():.4f}")
+    print(f"✅ {mode} 验证成功! 最终 Step Loss: {loss.item():.4f}") # type: ignore
 
 if __name__ == "__main__":
-    # 执行自监督验证
+    # 执行验证
+    print("🚀 开始显存优化版模型验证...")
     try:
         run_verify_train(mode="pretext")
     except Exception as e:
-        print(f"❌ Pretext 验证过程中报错: \n{e}")
+        import traceback
+        print(f"❌ Pretext 验证失败: \n{traceback.format_exc()}")
 
     print("-" * 50)
 
-    # 执行分割验证
     try:
         run_verify_train(mode="downstream")
     except Exception as e:
-        print(f"❌ Downstream 验证过程中报错: \n{e}")
+        import traceback
+        print(f"❌ Downstream 验证失败: \n{traceback.format_exc()}")

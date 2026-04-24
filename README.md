@@ -84,3 +84,48 @@ tpu_use_cluster: false
 tpu_use_sudo: false
 use_cpu: false
 ```
+
+这绝对是**目前最明智的决定**。
+
+你刚才看到的 `12.00 GiB` 内存请求，很大程度上是因为 `transformers` 的 **Naive 实现**（纯 PyTorch 循环和矩阵广播）极其低效。而在 Linux Docker 容器中，你可以安装 Mamba 的**官方 CUDA 算子**，性能会有质的飞跃。
+
+### 为什么 Docker 容器能解决你的问题？
+
+1.  **Selective Scan 内核加速**：官方的 `mamba-ssm` 和 `causal-conv1d` 算子使用了 **Fused CUDA Kernel**。
+    * **Naive 实现（你现在的路径）**：会将所有中间状态 $SBMD$ 全部展开存储在显存里，导致内存需求随序列长度爆炸。
+    * **CUDA 算子（Docker 路径）**：在 GPU 寄存器里完成计算，**不存储中间的大型张量**。显存占用能降低 **5~10 倍**。
+2.  **避免 Windows 编译地狱**：Mamba 的 C++/CUDA 扩展在 Windows 下编译非常困难（需要特定的 VS Build Tools 和环境变量）。在 Docker (Ubuntu) 环境下，一个 `pip install` 就能搞定。
+
+---
+
+### 推荐的 Docker 开发配置
+
+不要去折腾最基础的 `nvidia/cuda` 镜像。建议使用 **NVIDIA 官方 PyTorch 镜像**，它已经配置好了所有的路径和驱动映射。
+
+#### 1. 拉取镜像
+```bash
+docker pull nvcr.io/nvidia/pytorch:24.01-py3
+```
+
+#### 2. 启动容器 (VS Code 远程开发推荐)
+如果你用 VS Code，可以使用 "Dev Containers" 插件直接进入：
+```bash
+docker run --gpus all -it --rm -v C:\Users\admin\Desktop\personal\mambaGPR:/workspace nvcr.io/nvidia/pytorch:24.01-py3 /bin/bash
+```
+
+#### 3. 进入容器后安装高性能算子
+在容器的终端里运行：
+```bash
+pip install causal-conv1d>=1.4.0
+pip install mamba-ssm
+```
+安装完成后，你再运行脚本，那行 `[transformers] The fast path is not available...` 的警告会消失，取而代之的是**极快的运行速度**和**极低的显存占用**。
+
+---
+
+### 现在的行动建议
+
+1.  **如果你想立刻验证模型逻辑**：按照我上一条回复，把 `batch_size` 设为 1，`hidden_size` 降到 64，看能不能勉强跑通。
+2.  **如果你想正式开始科研/训练**：**立即转战 Docker**。在 8GB 显存这种受限环境下，高性能 CUDA 算子不是“选修课”，而是“必修课”。
+
+**总结**：Docker 提供的 Linux 环境能让你用上 Mamba 的“真身”（Triton/CUDA Kernels），而你现在在 Windows 上跑的是它的“幻影”（Naive Python 重写）。**换环境吧，这会节省你后续几周的调试时间。**
