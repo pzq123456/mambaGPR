@@ -1,4 +1,3 @@
-# src/inference.py
 import argparse
 import numpy as np
 import torch
@@ -45,10 +44,12 @@ def save_simple_comparison(img_path, gt_path, pred_mask, save_path):
 
 @torch.no_grad()
 def main():
-    parser = argparse.ArgumentParser(description="MCG GPR Mini Visual Verification Tool")
+    parser = argparse.ArgumentParser(description="MCG GPR Mini Visual & Evaluation Tool")
     parser.add_argument("--index", type=int, default=0, help="单张图片查询的索引")
     parser.add_argument("--num_samples", type=int, default=None, help="批量抽检前 N 个数据 (如: 5)")
     parser.add_argument("--files", type=str, nargs="+", default=None, help="指定某些特定文件名进行检查 (如: cc210 cc240)")
+    # 🌟 新增参数：全验证集总指标评估模式
+    parser.add_argument("--eval_all", action="store_true", help="是否对整个验证集进行全量指标评估（默认关闭可视化以提速）")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,13 +57,16 @@ def main():
     # 1. 挂载有监督数据集
     val_dataset = GPRDataset(config.DOWNSTREAM_VAL_IMG_DIR, config.DOWNSTREAM_VAL_ANN_DIR, split="val")
     
-    # ---- 核心修改：动态判定和解析索引映射 ----
-    if args.files is not None:
+    # ---- 动态判定和解析索引映射 ----
+    if args.eval_all:
+        # 全量评估模式
+        indices = list(range(len(val_dataset)))
+        print(f"🎬 模式: 验证集全量评估模式，共评估 {len(indices)} 张图片。")
+        
+    elif args.files is not None:
         indices = []
-        # 将输入统一转为小写，去除可能的扩展名（如 .png），方便不区分大小写地精准配对
         target_stems = [f.lower().split('.')[0] for f in args.files]
         
-        # 遍历数据集，通过文件名反查 index
         for idx, img_path in enumerate(val_dataset.img_files):
             if img_path.stem.lower() in target_stems:
                 indices.append(idx)
@@ -81,7 +85,7 @@ def main():
         indices = [args.index]
         print(f"🎬 模式: 单张检查样本 [Index: {args.index}]")
 
-    # 2. 模型搭建与权重载入 (只需初始化一次)
+    # 2. 模型搭建与权重载入
     model = GPRMambaIndustrial(config.IN_CHANNELS, config.NUM_CLASSES, config.HIDDEN_SIZE, config.NUM_LAYERS).to(device)
     ckpt_path = config.PROJECT_ROOT / "checkpoints" / "checkpoint_best" / "model.safetensors"
     
@@ -89,34 +93,55 @@ def main():
     model.load_state_dict({k.replace("module.", ""): v for k, v in state_dict.items()})
     model.eval()
 
-    # 创建输出目录
+    # 🌟 核心重构：将 Metrics 的初始化提到循环外，使其能够全局累加混淆矩阵
+    global_metrics = GPRMetrics(num_classes=config.NUM_CLASSES, device=device)
+
+    # 创建输出目录（仅在需要可视化时有用）
     out_dir = config.PROJECT_ROOT / "inference_results"
-    out_dir.mkdir(exist_ok=True)
+    if not args.eval_all:
+        out_dir.mkdir(exist_ok=True)
 
     # 3. 循环迭代推理
-    for idx in indices:
+    for i, idx in enumerate(indices):
         img_tensor, mask_tensor = val_dataset[idx]
         img_path = val_dataset.img_files[idx]
         gt_path = val_dataset.ann_dir / img_path.name
 
         # 前向推理
         logits = model(img_tensor.unsqueeze(0).contiguous().to(device))
-        pred_mask = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
-
-        # 计算指标
-        metrics = GPRMetrics(num_classes=config.NUM_CLASSES, device=device)
-        metrics.update(logits, mask_tensor.unsqueeze(0).to(device))
         
-        print(f"\n📊 MCG GPR 验证样本 [Index: {idx}] - {img_path.name}")
-        for k, v in metrics.compute().items():
-            print(f" 🔹 {k:10}: {v:.4f}")
+        # 🌟 持续累加当前样本的指标到全局混淆矩阵中
+        global_metrics.update(logits, mask_tensor.unsqueeze(0).to(device))
         
-        # 保存双联对比图
-        save_path = out_dir / f"{img_path.stem}_dual_comparison.png"
-        save_simple_comparison(img_path, gt_path, pred_mask, save_path)
-        print(f"💾 渲染完毕 -> inference_results/{save_path.name}")
+        # 打印进度或单张结果
+        if args.eval_all:
+            if (i + 1) % 10 == 0 or (i + 1) == len(indices):
+                print(f"⏳ 已处理进度: [{i + 1}/{len(indices)}]")
+        else:
+            # 抽检模式下：打印单张指标并渲染图片
+            pred_mask = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+            
+            # 局部计算单张图的展示（这里直接用 global_metrics 算出来的就是截止到当前的，
+            # 如果只想看单张，也可以从 global_metrics 单独 compute，但由于抽检模式通常互相独立，直接打印即可）
+            print(f"\n📊 MCG GPR 验证样本 [Index: {idx}] - {img_path.name}")
+            
+            # 保存双联对比图
+            save_path = out_dir / f"{img_path.stem}_dual_comparison.png"
+            save_simple_comparison(img_path, gt_path, pred_mask, save_path)
+            print(f"💾 渲染完毕 -> inference_results/{save_path.name}")
     
-    print("\n✅ 所有指定的验证集数据已处理完毕！\n")
+    # 🌟 4. 打印最终的平均/汇总指标
+    print("\n==================================================")
+    if args.eval_all:
+        print(f"🏆 【全验证集总平均指标评估结果】(总计 {len(indices)} 张图)")
+    else:
+        print(f"📊 【当前抽检样本汇总指标】(总计 {len(indices)} 张图)")
+    print("==================================================")
+    
+    for k, v in global_metrics.compute().items():
+        print(f" 🎯 {k:10}: {v:.4f}")
+    print("==================================================\n")
+    print("✅ 所有数据处理完毕！\n")
 
 
 if __name__ == "__main__":
