@@ -13,3 +13,4 @@ tmp
 wandb
 test_checkpoints
 checkpoints
+inference_results
