@@ -214,3 +214,6 @@ for epoch in range(100):
 
 MCG GPR dataset: https://zenodo.org/records/14270869
 Mamba-Net: https://arxiv.org/pdf/2601.17108
+
+
+https://mp.weixin.qq.com/s?__biz=Mzg4MzU5OTg5Nw==&mid=2247492581&idx=1&sn=b12f94474adc189fb135f1e156bf4594&chksm=cee4ff2892e5a7bb2766e8c2638c1eb3951673cb1b05c05c119b8e3d81901899553a0dc56212&mpshare=1&srcid=04235hFoTrhHRJm2NmokH18r&sharer_shareinfo=7c7530eba32f389158d0d576d3bc9352&sharer_shareinfo_first=7c7530eba32f389158d0d576d3bc9352&from=timeline&scene=2&subscene=1&sessionid=1776987229&clicktime=1776987920&enterid=1776987920&ascene=2&fasttmpl_type=0&fasttmpl_fullversion=8227329-zh_CN-zip&fasttmpl_flag=0&realreporttime=1776987920089&devicetype=android-36&version=28003933&nettype=WIFI&lang=zh_HK&exportkey=n_ChQIAhIQ8YvOMC3miuMz5J08J8V58hL2AQIE97dBBAEAAAAAAAr6IewMRRUAAAAOpnltbLcz9gKNyK89dVj0%2F8ORjFyPB9rQQBT%2Fh6RDSgOijjuP%2BCLrZ6Vm1mMSwv9dj0uloBCjuG0Dbnr4NTkW84MZ79KRg0C6L6%2BUPo0e2eJTkl%2FyKAYVxCYKO8NREzvuGBlQOC5uedTzd9w8VE%2BLst7EwGTkAP9SsqP5jmmrsj%2BAgw34cpGQ%2Fe8P6DIw0uAVfodTsQU%2F%2BQQoYwGsS7jQYwUMjlYJGsD%2FuBygvcRIQ7Z9q8XUEfTjCDeF3UFzweFex6rzcFZSqvvwgvaMtCFP6DDKME46TVv4yI4JG76F%2Bw%3D%3D&pass_ticket=yx7O80LPpyVMuwUucPElN%2BY3uINsR9eeFbpR1ZFSYaaaR9f1aNSw99YSxS1GzWIP&wx_header=3
